@@ -26,12 +26,8 @@ type QuickCloud struct {
 	SessionToken string
 }
 
-func New(endpoint string) *QuickCloud {
-	return &QuickCloud{endpoint}
-}
-
 func New(endpoint string, appId string, appSecret string) *QuickCloud {
-	return &QuickCloud{endpoint, appId, appSecret}
+	return &QuickCloud{endpoint, appId, appSecret, ""}
 }
 
 func (this *QuickCloud) Register(email string, password string, name string) {
@@ -43,13 +39,14 @@ func (this *QuickCloud) Register(email string, password string, name string) {
 	data.Add("name", name)
 	req.Body(strings.NewReader(data.Encode()))
 
-	resp, err := req.String()
+	_, err := req.String()
 	if err == nil {
 		panic(err)
 	}
 }
 
 func (this *QuickCloud) Token(requestCode string) string {
+
 	req := httplib.Post(this.Endpoint + TOKEN)
 	req.Header(HEADER_APP_ID, this.AppId)
 	req.Header(HEADER_APP_SECRET, this.AppSecret)
@@ -65,6 +62,22 @@ func (this *QuickCloud) Token(requestCode string) string {
 	return token
 }
 
-func (this *QuickCloud) Me() {
+func (this *QuickCloud) CreateGroup(name string, desc string) string {
+	req := httplib.Post(this.Endpoint + CORE + GROUPS)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_APP_SECRET, this.AppSecret)
+
+	var data = url.Values{}
+	data.Add("_name", name)
+	data.Add("description", desc)
+	req.Body(strings.NewReader(data.Encode()))
+
+	_, err := req.String()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (this *QuickCloud) UploadFile(icon string, public bool) {
 
 }
