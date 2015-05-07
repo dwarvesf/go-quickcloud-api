@@ -14,6 +14,7 @@ const (
 	HEADER_TOKEN      = "X-QuickCloud-Session-Token"
 	PRE_URL           = "https://staging-api.quickcloud.io"
 	CORE              = "/core"
+	SEARCH            = "/search"
 	TOKEN             = "/oauth/token"
 	GROUPS            = "/groups"
 	APPS              = "/apps"
@@ -22,7 +23,13 @@ const (
 	LOGIN             = "/login"
 	CONFIGURATION     = "/classes/Configuration"
 	MEMBERS           = "/members"
+	FILES             = "/files"
 )
+
+type Acl struct {
+	read  bool
+	write bool
+}
 
 type QuickCloud struct {
 	Endpoint     string
@@ -240,6 +247,132 @@ func (this *QuickCloud) JoinGroup(userToken string, code string) {
 	}
 }
 
-func (this *QuickCloud) UploadFile(icon string, public bool) {
+func (this *QuickCloud) UploadFile(file string, name string) (string, string) {
+	req := httplib.Post(this.Endpoint + CORE + FILES)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
 
+	var data = url.Values{}
+	data.Add("_name", file)
+	req.Body(data)
+
+	req.PostFile("_file", file)
+
+	type Response struct {
+		ObjectId string `json:"objectId"`
+	}
+
+	var resp Response
+	err := req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	filePath := this.Endpoint + CORE + FILES + "/" + resp.ObjectId + "/download"
+
+	return resp.ObjectId, filePath
+}
+
+// Register class to Search Index
+// https://staging-api.quickcloud.io/search/apps/551d559764617400a4380000/Information/register
+func (this *QuickCloud) RegisterSearchIndex(groupId string, className string) {
+	req := httplib.Post(this.Endpoint + SEARCH + APPS + "/" + groupId + "/" + className + "/register")
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+
+	_, err := req.String()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (this *QuickCloud) CreateObject(groupId string, className string, object interface{}) string {
+	url := this.Endpoint + CORE + "/classes/" + className
+	req := httplib.Post(url)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+
+	data, err := json.Marshal(object)
+	if err != nil {
+		panic(err)
+	}
+
+	req.Body(data)
+	type Response struct {
+		ObjectId string `json:"objectId"`
+	}
+
+	var resp Response
+	err = req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	this.SetPublicAcl(url + "/" + resp.ObjectId)
+
+	return resp.ObjectId
+}
+
+func (this *QuickCloud) CreateAppObject(groupId string, className string, object interface{}) string {
+
+	url := this.Endpoint + CORE + APPS + "/" + this.AppId + "/classes/" + className
+	req := httplib.Post(url)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+
+	data, err := json.Marshal(object)
+	if err != nil {
+		panic(err)
+	}
+
+	req.Body(data)
+	type Response struct {
+		ObjectId string `json:"objectId"`
+	}
+
+	var resp Response
+	err = req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	this.SetPublicAcl(url + "/" + resp.ObjectId)
+
+	return resp.ObjectId
+}
+
+func (this *QuickCloud) SetPublicAcl(url string) {
+
+	// Get Object
+	req := httplib.Get(url)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+
+	type Response struct {
+		Name map[string]Acl `json:"_acl"`
+	}
+
+	var resp Response
+	err := req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	publicAcl := Acl{true, true}
+	resp.Name["*"] = publicAcl
+
+	putReq := httplib.Put(url)
+	putReq.Header(HEADER_APP_ID, this.AppId)
+	putReq.Header(HEADER_TOKEN, this.SessionToken)
+
+	data, err1 := json.Marshal(resp)
+	if err1 != nil {
+		panic(err1)
+	}
+
+	putReq.Body(data)
+	_, err = putReq.String()
+	if err != nil {
+		panic(err)
+	}
 }
