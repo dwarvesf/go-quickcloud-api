@@ -1,7 +1,17 @@
 package quickcloud
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,6 +39,12 @@ const (
 	MEMBERS             = "/members"
 	FILES               = "/files"
 )
+
+type Role struct {
+	Name     string `json:"_name"`
+	Group    string `json:"_group"`
+	ObjectId string `json:"objectId"`
+}
 
 type Acl struct {
 	Read  bool `json:"read"`
@@ -59,7 +75,9 @@ type QuickCloud struct {
 type File struct {
 	ObjectId string `json:"objectId"`
 	Url      string `json:"url"`
-	Name     string `json:"name"`
+	Name     string `json:"_name"`
+	Folder   string `json:"_folder"`
+	GroupId  string `json:"groudId"`
 }
 
 func New(endpoint string, appId string, appSecret string) *QuickCloud {
@@ -223,7 +241,7 @@ func (this *QuickCloud) CreateGroup(name string, desc string) string {
 		log.Errorln(resp.Error)
 	}
 
-	log.Infoln("GroupId: " + resp.ObjectId)
+	log.Warningln("GroupId: " + resp.ObjectId)
 	return resp.ObjectId
 }
 
@@ -409,27 +427,79 @@ func (this *QuickCloud) JoinGroup(userToken string, code string) {
 	}
 }
 
-func (this *QuickCloud) UploadFile(file string, name string) File {
+func (this *QuickCloud) UploadFile(groupId string, file string, name string) File {
 
-	req := httplib.Post(this.Endpoint + CORE + FILES)
-	req.Header(HEADER_APP_ID, this.AppId)
-	req.Header(HEADER_TOKEN, this.SessionToken)
-	req.Header(HEADER_CONTENT_TYPE, APPLICATION_JSON)
+	url := this.Endpoint + CORE + FILES
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
 
-	data := map[string]interface{}{
-		"_name": name,
-	}
-
-	jsonStr, err := json.Marshal(data)
+	f, err := os.Open(file)
 	if err != nil {
 		panic(err)
 	}
 
-	req.PostFile("_file", file)
-	req.Body(jsonStr)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition",
+		fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+			escapeQuotes("_file"), escapeQuotes(file)))
+	h.Set("Content-Type", mime.TypeByExtension(filepath.Ext(file)))
+
+	//fw, err := writer.CreateFormFile("_file", file)
+	fw, err := writer.CreatePart(h)
+	if err != nil {
+		panic(err)
+	}
+
+	if _, err = io.Copy(fw, f); err != nil {
+		panic(err)
+	}
+
+	// Add the other fields
+	if fw, err = writer.CreateFormField("_name"); err != nil {
+		panic(err)
+	}
+	if _, err = fw.Write([]byte(name)); err != nil {
+		panic(err)
+	}
+
+	if fw, err = writer.CreateFormField("_folder"); err != nil {
+		panic(err)
+	}
+	if _, err = fw.Write([]byte(groupId)); err != nil {
+		panic(err)
+	}
+
+	if fw, err = writer.CreateFormField("groupId"); err != nil {
+		panic(err)
+	}
+	if _, err = fw.Write([]byte(groupId)); err != nil {
+		panic(err)
+	}
+
+	writer.Close()
+
+	// Create client
+	client := &http.Client{}
+
+	// Create request
+	req, err := http.NewRequest("POST", url, body)
+
+	req.Header.Add("X-QuickCloud-Session-Token", this.SessionToken)
+	req.Header.Add("X-QuickCloud-App-Id", this.AppId)
+	req.Header.Add("Content-Type", writer.FormDataContentType())
+
+	// Fetch Request
+	res, err := client.Do(req)
+
+	if err != nil {
+		fmt.Println("Failure : ", err)
+	}
+
+	// Read Response Body
+	respBody, _ := ioutil.ReadAll(res.Body)
 
 	var resp Response
-	err = req.ToJson(&resp)
+	err = json.Unmarshal(respBody, &resp)
 	if err != nil {
 		panic(err)
 	}
@@ -442,7 +512,13 @@ func (this *QuickCloud) UploadFile(file string, name string) File {
 	log.Infoln("Uploaded file: " + fileUrl)
 
 	this.SetPublicAcl(fileUrl)
-	return File{resp.ObjectId, fileUrl, name}
+	return File{
+		ObjectId: resp.ObjectId,
+		Url:      fileUrl,
+		Name:     name,
+		Folder:   groupId,
+		GroupId:  groupId,
+	}
 }
 
 // Register class to Search Index
@@ -460,6 +536,38 @@ func (this *QuickCloud) RegisterSearchIndex(groupId string, className string) {
 	}
 
 	log.Infoln("Registered search index for class:" + className)
+}
+
+func (this *QuickCloud) CreatePublicObject(groupId string, className string, object interface{}) string {
+	Trace()
+
+	url := this.Endpoint + CORE + "/classes/" + className
+	req := httplib.Post(url)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+	req.Header(HEADER_CONTENT_TYPE, APPLICATION_JSON)
+
+	data, err := json.Marshal(object)
+	if err != nil {
+		panic(err)
+	}
+
+	req.Body(data)
+
+	var resp Response
+	err = req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	if resp.Error != "" {
+		log.Errorln(resp.Error)
+	}
+
+	this.SetRoleAcl(url+"/"+resp.ObjectId, groupId)
+
+	log.Infoln(" -> Create " + className + "/" + resp.ObjectId)
+	return resp.ObjectId
 }
 
 func (this *QuickCloud) CreateObject(groupId string, className string, object interface{}) string {
@@ -525,6 +633,82 @@ func (this *QuickCloud) CreateAppObject(groupId string, className string, object
 	return resp.ObjectId
 }
 
+func (this *QuickCloud) GetRole(groupId string) []Role {
+
+	req := httplib.Get(this.Endpoint + CORE + ROLES)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+	req.Header(HEADER_CONTENT_TYPE, APPLICATION_JSON)
+
+	req.Param("where", "{\"_group\":\""+groupId+"\"}")
+
+	type Response struct {
+		Results []Role `json:"results"`
+	}
+
+	var resp Response
+	err := req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	// fmt.Printf("%+v\n", resp)
+	return resp.Results
+}
+
+func (this *QuickCloud) SetRoleAcl(url string, groupId string) {
+
+	// Get Object
+	req := httplib.Get(url)
+	req.Header(HEADER_APP_ID, this.AppId)
+	req.Header(HEADER_TOKEN, this.SessionToken)
+	req.Header(HEADER_CONTENT_TYPE, APPLICATION_JSON)
+
+	type Response struct {
+		Name map[string]Acl `json:"_acl"`
+	}
+
+	var resp Response
+	err := req.ToJson(&resp)
+	if err != nil {
+		panic(err)
+	}
+
+	roles := this.GetRole(groupId)
+
+	adminAcl := Acl{true, true}
+	normalAcl := Acl{true, false}
+	publicAcl := Acl{true, true}
+
+	resp.Name["*"] = publicAcl
+
+	for _, value := range roles {
+		if value.Name == "Admin" {
+			resp.Name["role:"+value.ObjectId] = adminAcl
+		} else {
+			resp.Name["role:"+value.ObjectId] = normalAcl
+		}
+	}
+
+	// fmt.Printf("%+v\n", resp)
+
+	putReq := httplib.Put(url)
+	putReq.Header(HEADER_APP_ID, this.AppId)
+	putReq.Header(HEADER_TOKEN, this.SessionToken)
+	putReq.Header(HEADER_CONTENT_TYPE, APPLICATION_JSON)
+
+	data, err1 := json.Marshal(resp)
+	if err1 != nil {
+		panic(err1)
+	}
+
+	putReq.Body(data)
+	_, err = putReq.String()
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (this *QuickCloud) SetPublicAcl(url string) {
 
 	// Trace()
@@ -565,4 +749,8 @@ func (this *QuickCloud) SetPublicAcl(url string) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func escapeQuotes(s string) string {
+	return strings.NewReplacer("\\", "\\\\", `"`, "\\\"").Replace(s)
 }
