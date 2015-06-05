@@ -334,6 +334,7 @@ func (this *QuickCloud) AssignRole(groupId string, userId string, role string) {
 	if err != nil {
 		panic(err)
 	}
+	req.Debug(true)
 	req.Body(jsonStr)
 
 	var resp Response
